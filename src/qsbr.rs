@@ -1,16 +1,16 @@
-use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
-// TODO needing Mutex dependent on feature `std`, otherwise use a spinlock
-use std::sync::Mutex;
+use core::sync::atomic::{self, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::ptr::null_mut;
 
+#[derive(Debug)]
 struct TentryListElem {
-    next: AtomicPtr<Option<TentryListElem>>,
-    prev: AtomicPtr<Option<TentryListElem>>,
+    next: AtomicPtr<TentryListElem>,
+    prev: AtomicPtr<TentryListElem>,
     elem: Tentry,
 }
 
 struct TentryList {
-    head: AtomicPtr<Option<TentryListElem>>,
-    mutex: Mutex<usize>,
+    head: AtomicPtr<TentryListElem>,
+    state: AtomicU32,
 }
 
 struct TentryListIterator<'a> {
@@ -23,7 +23,7 @@ impl<'a> TentryListIterator<'a> {
     fn new(guard: QsbrGuard<'a>, list: &'a TentryList) -> Self {
         let tmp = list.head.load(Ordering::Relaxed);
         Self {
-            next: unsafe { (*tmp).as_ref() },
+            next: unsafe { tmp.as_ref() },
             guard,
         }
     }
@@ -33,52 +33,74 @@ impl<'a> Iterator for TentryListIterator<'a> {
     type Item = &'a Tentry;
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(e) = self.next {
-            self.next = unsafe { (*e.next.load(Ordering::Relaxed)).as_ref() };
+            self.next = unsafe { e.next.load(Ordering::Relaxed).as_ref() };
             return Some(&e.elem);
         }
         None
     }
 }
 
-impl TentryList {
-    fn new() -> Self {
-        let mut n: Option<TentryListElem> = None;
-        Self {
-            head: AtomicPtr::new(&mut n),
-            mutex: Mutex::new(0),
+pub struct TentryListGuard<'a> {
+    lock: &'a TentryList,
+}
+
+impl Drop for TentryListGuard<'_> {
+    fn drop(&mut self) {
+        if self.lock.state.fetch_sub(1, Ordering::Release) == 1 {
+            atomic_wait::wake_one(&self.lock.state);
         }
     }
+}
+
+impl TentryList {
+    fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(null_mut()),
+            state: AtomicU32::new(0),
+        }
+    }
+
+    pub fn lock(&self) -> TentryListGuard<'_> {
+        while let Err(s) = self
+            .state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        {
+            atomic_wait::wait(&self.state, s);
+        }
+        TentryListGuard { lock: self }
+    }
+
     fn insert(&self, elem: Tentry) -> &Tentry {
-        let guard = self.mutex.lock();
-        let mut n: Option<TentryListElem> = None;
+        let guard = self.lock();
         let mut new_elem = TentryListElem {
-            next: AtomicPtr::new(&mut n),
-            prev: AtomicPtr::new(&mut n),
+            next: AtomicPtr::new(null_mut()),
+            prev: AtomicPtr::new(null_mut()),
             elem,
         };
         let mut prev = self.head.load(Ordering::Relaxed);
         if prev.is_null() {
-            self.head.store(&mut Some(new_elem), Ordering::Relaxed);
-            let ret = unsafe { &(*self.head.load(Ordering::Relaxed)).as_ref().unwrap().elem };
+            self.head
+                .store(Box::leak(Box::new(new_elem)), Ordering::Relaxed);
+            let ret = unsafe { &(*self.head.load(Ordering::Relaxed)).elem };
             drop(guard);
             return ret;
         }
-        while unsafe { (*prev).as_ref().unwrap().elem.id < new_elem.elem.id } {
-            let next = unsafe { (*prev).as_ref().unwrap().next.load(Ordering::Relaxed) };
-            if unsafe { (*next).is_none() } {
+        while unsafe { (*prev).elem.id < new_elem.elem.id } {
+            let next = unsafe { (*prev).next.load(Ordering::Relaxed) };
+            if next.is_null() {
                 break;
             } else {
                 prev = next;
             }
         }
-        let next = unsafe { (*prev).as_ref().unwrap().next.load(Ordering::Relaxed) };
+        let next = unsafe { (*prev).next.load(Ordering::Relaxed) };
         new_elem.next = AtomicPtr::new(next);
         new_elem.prev = AtomicPtr::new(prev);
         //TODO figure out how to remove need for Box
-        let e: *mut Option<TentryListElem> = Box::leak(Box::new(Some(new_elem)));
-        unsafe { (*next).as_ref().unwrap().prev.store(e, Ordering::Relaxed) };
-        unsafe { (*prev).as_ref().unwrap().next.store(e, Ordering::Relaxed) };
-        let ret = unsafe { &(*e).as_ref().unwrap().elem };
+        let e = Box::leak(Box::new(new_elem));
+        unsafe { (*next).prev.store(e, Ordering::Relaxed) };
+        unsafe { (*prev).next.store(e, Ordering::Relaxed) };
+        let ret = &e.elem;
 
         drop(guard);
         ret
@@ -87,39 +109,31 @@ impl TentryList {
     /// dropped, this can be done by syncing, plus waiting for all other threads already syncing
     /// to finish
     unsafe fn remove(&self, elem: &Tentry) -> Tentry {
-        let guard = self.mutex.lock();
+        let guard = self.lock();
         let id = elem.id;
         //TODO make unsafe section smaller
         let mut e = self.head.load(Ordering::Relaxed);
         if e.is_null() {
             panic!("no elem in TentryList");
         }
-        while unsafe { (*e).as_ref().unwrap().elem.id } != id {
-            let tmp = unsafe { (*e).as_ref().unwrap().next.load(Ordering::Relaxed) };
-            if unsafe { (*tmp).is_none() } {
+        while unsafe { (*e).elem.id } != id {
+            let tmp = unsafe { (*e).next.load(Ordering::Relaxed) };
+            if tmp.is_null() {
                 panic!("elem not found in TentryList");
             } else {
                 e = tmp;
             }
         }
-        let next = unsafe { (*e).as_ref().unwrap().next.load(Ordering::Relaxed) };
-        let prev = unsafe { (*e).as_ref().unwrap().prev.load(Ordering::Relaxed) };
-        unsafe {
-            (*next)
-                .as_ref()
-                .unwrap()
-                .prev
-                .store(prev, Ordering::Relaxed)
-        };
-        unsafe {
-            (*prev)
-                .as_ref()
-                .unwrap()
-                .next
-                .store(next, Ordering::Relaxed)
-        };
+        let next = unsafe { (*e).next.load(Ordering::Relaxed) };
+        let prev = unsafe { (*e).prev.load(Ordering::Relaxed) };
+        if !next.is_null() {
+            unsafe { (*next).prev.store(prev, Ordering::Relaxed) };
+        }
+        if !prev.is_null() {
+            unsafe { (*prev).next.store(next, Ordering::Relaxed) };
+        }
         //TODO figure out how to remove need for Box
-        let ret = unsafe { Box::from_raw(e).unwrap().elem };
+        let ret = unsafe { Box::from_raw(e).elem };
         drop(guard);
         ret
     }
@@ -261,6 +275,56 @@ impl QsbrThreadHandle<'_> {
             self.info.qstate.store(prev_state + 1, Ordering::Release);
         }
     }
+    pub fn drop_sync(&mut self) {
+        //TODO currently mostly a copy of sync
+
+        // Ordering: set long term quescent state
+        self.info.qstate.store(1, Ordering::Release);
+        // copy all Tentry's with Relaxed ordering
+        let local_copy: Vec<(u64, usize)> = self
+            .threads_iter()
+            .map(|e: &Tentry| (e.id, e.qstate.load(Ordering::Relaxed)))
+            .filter(|x| x.1 != 0)
+            .collect();
+        // Ordering: make qstate in `local_copy` happen before the comming for loop
+        atomic::fence(Ordering::Acquire);
+        let mut before = local_copy.into_iter();
+        let mut b = if let Some(v) = before.next() {
+            v
+        } else {
+            return;
+        };
+        for after in self.threads_iter() {
+            // b is being dropped, so move on to next elem
+            // could be removed, sync b _should_ have qstate set to 0
+            while b.0 < after.id {
+                b = if let Some(v) = before.next() {
+                    v
+                } else {
+                    return;
+                };
+            }
+            // after didn't exist when sync started, so move on to next elem
+            if b.0 > after.id {
+                continue;
+            }
+            assert!(b.0 == after.id);
+            loop {
+                //Ordering: Acq fence after for loop ensures qstate seen has already happened, so
+                //can be relaxed here
+                let qstate = after.qstate.load(Ordering::Relaxed);
+                // if incr then passed through a qstate, if < 10 currently in a long quescent state
+                if (qstate == 0) || (qstate > b.1) {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        //Ordering: make sure all the Tentry's passed through a quescent state before returning
+        atomic::fence(Ordering::Acquire);
+
+        self.info.qstate.store(0, Ordering::Release);
+    }
 }
 
 //unregistering a thread
@@ -273,8 +337,8 @@ impl Drop for QsbrThreadHandle<'_> {
         //TODO FIXME wait for running syncs to end to avoid use after free
         //currently a double sync should be enough, but after impl a try_sync it won't be
         //anymore
-        self.sync();
-        self.sync();
+        self.drop_sync();
+        self.drop_sync();
         #[allow(clippy::drop_non_drop)]
         drop(tentry);
     }
@@ -298,6 +362,7 @@ impl Drop for QsbrGuard<'_> {
     }
 }
 
+#[derive(Debug)]
 struct Tentry {
     //incremented everytime this thread calls quiescent_state()
     //starts at 10
