@@ -1,5 +1,6 @@
 use crate::cds::rculist::*;
 use crate::utils::Futex;
+use crate::utils::Lock;
 use std::sync::atomic::{self, AtomicU32, Ordering};
 
 /// QSBR quiescent state based reclamation
@@ -8,7 +9,7 @@ use std::sync::atomic::{self, AtomicU32, Ordering};
 pub struct Qsbr {
     //threads will leave as long as self does
     threads: RcuList<Tentry>,
-    state: AtomicU32,
+    lock: Futex,
 }
 
 impl Default for Qsbr {
@@ -22,7 +23,7 @@ impl Qsbr {
     pub fn new() -> Self {
         Self {
             threads: RcuList::new(),
-            state: AtomicU32::new(0),
+            lock: Futex::new(),
         }
     }
     /// register a new thread with Qsbr
@@ -37,8 +38,8 @@ impl Qsbr {
     }
 
     /// internal only, used to simplify dropping thread handles
-    fn lock(&self) -> Futex {
-        Futex::lock(&self.state)
+    fn lock(&self) -> <Futex as Lock>::Guard {
+        self.lock.lock()
     }
 
     /// Saftey: Need to ensure no other threads are referencing the given Tentry before it is

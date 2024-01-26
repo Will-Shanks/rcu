@@ -1,9 +1,10 @@
 use crate::qsbr::*;
 use crate::utils::Futex;
+use crate::utils::Lock;
 use std::cmp::{PartialEq, PartialOrd};
 use std::{
     ptr::null_mut,
-    sync::atomic::{AtomicPtr, AtomicU32, Ordering},
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 #[derive(Debug)]
@@ -46,7 +47,7 @@ where
 {
     head: AtomicPtr<RcuListElem<T>>,
     // used for locking
-    state: AtomicU32,
+    lock: Futex,
 }
 
 impl<T> Drop for RcuList<T>
@@ -134,12 +135,12 @@ where
     pub fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
-            state: AtomicU32::new(0),
+            lock: Futex::new(),
         }
     }
 
-    fn lock(&self) -> Futex {
-        Futex::lock(&self.state)
+    fn lock(&self) -> <Futex as Lock>::Guard {
+        self.lock.lock()
     }
 
     pub fn insert(&self, elem: T) -> &T {
