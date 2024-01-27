@@ -1,45 +1,52 @@
 use crate::cds::rculist::*;
-use crate::utils::Futex;
 use crate::utils::Lock;
 use std::sync::atomic::{self, AtomicU32, Ordering};
 
 /// QSBR quiescent state based reclamation
 /// This is the main entry point to everything
 #[derive(Debug)]
-pub struct Qsbr {
+pub struct Qsbr<L>
+where
+    L: for<'a> Lock<'a>,
+{
     //threads will leave as long as self does
-    threads: RcuList<Tentry>,
-    lock: Futex,
+    threads: RcuList<Tentry, L>,
+    lock: L,
 }
 
-impl Default for Qsbr {
+impl<L> Default for Qsbr<L>
+where
+    L: for<'a> Lock<'a>,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Qsbr {
+impl<L> Qsbr<L>
+where
+    L: for<'a> Lock<'a>,
+{
+    /// internal only, used to simplify dropping thread handles
+    fn lock(&self) -> <L as Lock<'_>>::Guard {
+        self.lock.lock()
+    }
     /// create a new Qsbr
     pub fn new() -> Self {
         Self {
             threads: RcuList::new(),
-            lock: Futex::new(),
+            lock: L::new(),
         }
     }
     /// register a new thread with Qsbr
     /// takes an unique id for this handle
     /// thread::current().id().as_u64().get() could be a good choice if std is available
-    pub fn register(&self, id: u64) -> QsbrThreadHandle {
+    pub fn register(&self, id: u64) -> QsbrThreadHandle<L> {
         let elem: &Tentry = self.threads.insert(Tentry::new(id));
         QsbrThreadHandle {
             info: elem,
             qsbr: self,
         }
-    }
-
-    /// internal only, used to simplify dropping thread handles
-    fn lock(&self) -> <Futex as Lock>::Guard {
-        self.lock.lock()
     }
 
     /// Saftey: Need to ensure no other threads are referencing the given Tentry before it is
@@ -51,17 +58,23 @@ impl Qsbr {
 }
 
 ///created via Qsbr::register(), used to register a thread with the Qsbr,
-pub struct QsbrThreadHandle<'a> {
-    qsbr: &'a Qsbr,
+pub struct QsbrThreadHandle<'a, L>
+where
+    L: for<'b> Lock<'b>,
+{
+    qsbr: &'a Qsbr<L>,
     //needs to be an option so can set to None as part of Self::Drop
     info: &'a Tentry,
 }
 
-impl QsbrThreadHandle<'_> {
+impl<L> QsbrThreadHandle<'_, L>
+where
+    L: for<'a> Lock<'a>,
+{
     /// read starts an rcu critical section, which lasts until the returned
     /// QsbrGuard is dropped, is a no op, but used to ensure liveness of references
     /// by stop quescent_state from being called
-    pub fn read(&self) -> QsbrGuard {
+    pub fn read(&self) -> QsbrGuard<L> {
         QsbrGuard {
             thread_handle: self,
         }
@@ -225,7 +238,10 @@ impl QsbrThreadHandle<'_> {
 }
 
 //unregistering a thread
-impl Drop for QsbrThreadHandle<'_> {
+impl<L> Drop for QsbrThreadHandle<'_, L>
+where
+    L: for<'a> Lock<'a>,
+{
     /// unregisters the given handle with Qsbr
     fn drop(&mut self) {
         let tentry_ptr = unsafe { self.qsbr.remove(self.info) };
@@ -245,13 +261,19 @@ impl Drop for QsbrThreadHandle<'_> {
 /// i.e. the data being guarded can be concurrently read and modified
 /// essentially it just guaranties existence of the protected struct for the
 /// duration of the Guard's lifetime
-pub struct QsbrGuard<'a> {
+pub struct QsbrGuard<'a, L>
+where
+    L: for<'lock> Lock<'lock>,
+{
     #[allow(dead_code)]
-    thread_handle: &'a QsbrThreadHandle<'a>,
+    thread_handle: &'a QsbrThreadHandle<'a, L>,
 }
 
 // end the rcu critical section
-impl Drop for QsbrGuard<'_> {
+impl<L> Drop for QsbrGuard<'_, L>
+where
+    L: for<'a> Lock<'a>,
+{
     /// ends the critical section
     fn drop(&mut self) {
         //QsbrThreadHandle unlock(), which is currently a noop

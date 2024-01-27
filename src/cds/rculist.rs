@@ -2,6 +2,7 @@ use crate::qsbr::*;
 use crate::utils::Futex;
 use crate::utils::Lock;
 use std::cmp::{PartialEq, PartialOrd};
+use std::marker::PhantomData;
 use std::{
     ptr::null_mut,
     sync::atomic::{AtomicPtr, Ordering},
@@ -38,24 +39,27 @@ where
 }
 
 #[derive(Debug)]
-pub struct RcuList<T>
+pub struct RcuList<T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'a> Lock<'a>,
 {
     head: AtomicPtr<RcuListElem<T>>,
     // used for locking
     lock: Futex,
+    _rcu: PhantomData<L>,
 }
 
-impl<T> Drop for RcuList<T>
+impl<T, L> Drop for RcuList<T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'b> Lock<'b>,
 {
     fn drop(&mut self) {
         let mut tmp = self.head.load(Ordering::Relaxed);
@@ -68,26 +72,28 @@ where
     }
 }
 
-pub struct RcuListIterator<'a, T>
+pub struct RcuListIterator<'a, T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'b> Lock<'b>,
 {
     #[allow(dead_code)]
-    guard: &'a QsbrGuard<'a>,
+    guard: &'a QsbrGuard<'a, L>,
     next: Option<&'a RcuListElem<T>>,
 }
 
-impl<'a, T> RcuListIterator<'a, T>
+impl<'a, T, L> RcuListIterator<'a, T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'b> Lock<'b>,
 {
-    pub fn new(guard: &'a QsbrGuard<'a>, list: &'a RcuList<T>) -> Self {
+    pub fn new(guard: &'a QsbrGuard<'a, L>, list: &'a RcuList<T, L>) -> Self {
         let tmp = list.head.load(Ordering::Relaxed);
         Self {
             next: unsafe { tmp.as_ref() },
@@ -96,12 +102,13 @@ where
     }
 }
 
-impl<'a, T> Iterator for RcuListIterator<'a, T>
+impl<'a, T, L> Iterator for RcuListIterator<'a, T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'b> Lock<'b>,
 {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
@@ -113,29 +120,32 @@ where
     }
 }
 
-impl<T> Default for RcuList<T>
+impl<T, L> Default for RcuList<T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'b> Lock<'b>,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> RcuList<T>
+impl<T, L> RcuList<T, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
+    L: for<'b> Lock<'b>,
 {
     pub fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
             lock: Futex::new(),
+            _rcu: PhantomData,
         }
     }
 
@@ -176,7 +186,7 @@ where
         unsafe { &(*new_elem).elem }
     }
 
-    pub fn remove(&self, elem: &T, handle: &QsbrThreadHandle) -> T {
+    pub fn remove(&self, elem: &T, handle: &QsbrThreadHandle<L>) -> T {
         let popped_elem = unsafe { self.remove_unsynced(elem) };
         handle.sync();
 

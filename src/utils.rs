@@ -1,17 +1,17 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub(crate) trait Lock<'a> {
+pub trait Lock<'a> {
     type Guard;
     fn lock(&'a self) -> Self::Guard;
     fn new() -> Self;
 }
 
 #[derive(Debug)]
-pub(crate) struct Futex {
+pub struct Futex {
     state: AtomicU32,
 }
 
-pub(crate) struct FutexGuard<'a> {
+pub struct FutexGuard<'a> {
     futex: &'a Futex,
 }
 
@@ -42,11 +42,12 @@ impl<'a> Lock<'a> for Futex {
     }
 }
 
-pub(crate) struct SpinLock {
+#[derive(Debug)]
+pub struct SpinLock {
     state: AtomicU32,
 }
 
-pub(crate) struct SpinLockGuard<'a> {
+pub struct SpinLockGuard<'a> {
     spin: &'a SpinLock,
 }
 
