@@ -12,7 +12,7 @@ where
     L: for<'a> Lock<'a>,
 {
     //threads will leave as long as self does
-    threads: RcuList<Tentry, L>,
+    threads: RcuList<Tentry, Self>,
     lock: L,
 }
 
@@ -83,7 +83,7 @@ impl<'a, L> RcuHandle<'a> for QsbrThreadHandle<'a, L>
 where
     L: for<'lock> Lock<'lock>,
 {
-    type Guard<'b> = QsbrGuard<'b, L> where 'a: 'b;
+    type Guard<'b> = QsbrGuard<'b, L> where Self: 'a, 'a: 'b;
     /// read starts an rcu critical section, which lasts until the returned
     /// QsbrGuard is dropped, is a no op, but used to ensure liveness of references
     /// by stop quescent_state from being called

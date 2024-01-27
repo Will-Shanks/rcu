@@ -1,7 +1,6 @@
-use crate::qsbr::*;
 use crate::utils::Futex;
 use crate::utils::Lock;
-use crate::RcuHandle;
+use crate::{RcuHandle, RCU};
 use std::cmp::{PartialEq, PartialOrd};
 use std::marker::PhantomData;
 use std::{
@@ -40,27 +39,27 @@ where
 }
 
 #[derive(Debug)]
-pub struct RcuList<T, L>
+pub struct RcuList<T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'a> Lock<'a>,
+    R: RCU,
 {
     head: AtomicPtr<RcuListElem<T>>,
     // used for locking
     lock: Futex,
-    _rcu: PhantomData<L>,
+    _rcu: PhantomData<R>,
 }
 
-impl<T, L> Drop for RcuList<T, L>
+impl<T, R> Drop for RcuList<T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'b> Lock<'b>,
+    R: RCU,
 {
     fn drop(&mut self) {
         let mut tmp = self.head.load(Ordering::Relaxed);
@@ -73,43 +72,48 @@ where
     }
 }
 
-pub struct RcuListIterator<'a, T, L>
+pub struct RcuListIterator<'a, T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'b> Lock<'b>,
+    R: RCU + 'a,
 {
-    #[allow(dead_code)]
-    guard: &'a QsbrGuard<'a, L>,
+    _guard: PhantomData<R>,
     next: Option<&'a RcuListElem<T>>,
 }
 
-impl<'a, T, L> RcuListIterator<'a, T, L>
+impl<'a, T, R> RcuListIterator<'a, T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'b> Lock<'b>,
+    R: RCU + 'a,
 {
-    pub fn new(guard: &'a QsbrGuard<'a, L>, list: &'a RcuList<T, L>) -> Self {
+    pub fn new<'b>(
+        _guard: &'a <<R as RCU>::Handle<'b> as RcuHandle<'b>>::Guard<'b>,
+        list: &'a RcuList<T, R>,
+    ) -> Self
+    where
+        'b: 'a,
+    {
         let tmp = list.head.load(Ordering::Relaxed);
         Self {
             next: unsafe { tmp.as_ref() },
-            guard,
+            _guard: PhantomData,
         }
     }
 }
 
-impl<'a, T, L> Iterator for RcuListIterator<'a, T, L>
+impl<'a, T, R> Iterator for RcuListIterator<'a, T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'b> Lock<'b>,
+    R: RCU,
 {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
@@ -121,26 +125,26 @@ where
     }
 }
 
-impl<T, L> Default for RcuList<T, L>
+impl<T, R> Default for RcuList<T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'b> Lock<'b>,
+    R: RCU,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, L> RcuList<T, L>
+impl<T, R> RcuList<T, R>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
-    L: for<'b> Lock<'b>,
+    R: RCU,
 {
     pub fn new() -> Self {
         Self {
@@ -187,7 +191,10 @@ where
         unsafe { &(*new_elem).elem }
     }
 
-    pub fn remove(&self, elem: &T, handle: &mut QsbrThreadHandle<L>) -> T {
+    /// Safely remove an element from the list
+    ///
+    /// WARNING: since this method calls `handle.sync()` it can cause a deadlock
+    pub fn remove(&self, elem: &T, handle: &mut R::Handle<'_>) -> T {
         let popped_elem = unsafe { self.remove_unsynced(elem) };
         handle.quiescent_sync();
 

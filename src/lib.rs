@@ -14,6 +14,7 @@ pub trait RCU {
 pub trait RcuHandle<'a> {
     type Guard<'g>: RcuGuard<'g>
     where
+        Self: 'a,
         'a: 'g;
     fn read(&self) -> Self::Guard<'a>;
     fn quiescent_state(&mut self);

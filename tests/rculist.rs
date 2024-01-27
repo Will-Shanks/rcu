@@ -1,13 +1,13 @@
-use rcu::utils::{Futex, Lock, SpinLock};
-use rcu::{cds::rculist::RcuList, cds::rculist::RcuListIterator, qsbr::Qsbr};
-use rcu::{RcuHandle, RCU};
+use rcu::utils::{Futex, SpinLock};
+use rcu::{cds::rculist::RcuList, cds::rculist::RcuListIterator, qsbr::Qsbr, RcuHandle, RCU};
 use std::thread;
 
-fn modify_rcu<L>(id: u64, rcu_handle: &Qsbr<L>, list: &RcuList<u32, L>)
+fn modify_rcu<R>(id: u64, rcu_handle: &R, list: &RcuList<u32, R>)
 where
-    L: for<'a> Lock<'a>,
+    R: RCU,
 {
     let mut t_handle = rcu_handle.register(id);
+    t_handle.quiescent_state();
     let id = id.try_into().unwrap();
     list.insert(id);
     let guard = t_handle.read();
@@ -21,12 +21,13 @@ where
     }
     drop(guard);
     t_handle.quiescent_state();
+    drop(t_handle);
 }
 
 #[test]
 fn single_threaded_list_futex() {
-    let my_rcu = Qsbr::new();
-    let my_list = RcuList::<u32, Futex>::new();
+    let my_rcu = Qsbr::<Futex>::new();
+    let my_list = RcuList::<u32, Qsbr<Futex>>::new();
     thread::scope(|s| {
         let handle = &my_rcu;
         thread::Builder::new()
@@ -40,8 +41,8 @@ fn single_threaded_list_futex() {
 
 #[test]
 fn single_threaded_list_spin() {
-    let my_rcu = Qsbr::new();
-    let my_list = RcuList::<u32, SpinLock>::new();
+    let my_rcu = Qsbr::<SpinLock>::new();
+    let my_list = RcuList::<u32, Qsbr<SpinLock>>::new();
     thread::scope(|s| {
         let handle = &my_rcu;
         thread::Builder::new()
@@ -55,8 +56,8 @@ fn single_threaded_list_spin() {
 
 #[test]
 fn multi_threaded_list_futex() {
-    let my_rcu = Qsbr::new();
-    let my_list = RcuList::<u32, Futex>::new();
+    let my_rcu = Qsbr::<Futex>::new();
+    let my_list = RcuList::<u32, Qsbr<Futex>>::new();
     thread::scope(|s| {
         for i in 0..20 {
             let handle = &my_rcu;
@@ -73,8 +74,8 @@ fn multi_threaded_list_futex() {
 
 #[test]
 fn multi_threaded_list_spin() {
-    let my_rcu = Qsbr::new();
-    let my_list = RcuList::<u32, SpinLock>::new();
+    let my_rcu = Qsbr::<SpinLock>::new();
+    let my_list = RcuList::<u32, Qsbr<SpinLock>>::new();
     thread::scope(|s| {
         for i in 0..20 {
             let handle = &my_rcu;
