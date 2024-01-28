@@ -12,7 +12,7 @@ where
     L: for<'a> Lock<'a>,
 {
     //threads will leave as long as self does
-    threads: RcuList<Tentry, Self>,
+    threads: RcuList<Tentry, Self, L>,
     lock: L,
 }
 

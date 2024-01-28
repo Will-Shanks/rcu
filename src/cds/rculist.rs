@@ -1,4 +1,3 @@
-use crate::utils::Futex;
 use crate::utils::Lock;
 use crate::{RcuHandle, RCU};
 use std::cmp::{PartialEq, PartialOrd};
@@ -39,27 +38,29 @@ where
 }
 
 #[derive(Debug)]
-pub struct RcuList<T, R>
+pub struct RcuList<T, R, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
     R: RCU,
+    L: for<'a> Lock<'a>,
 {
     head: AtomicPtr<RcuListElem<T>>,
     // used for locking
-    lock: Futex,
+    lock: L,
     _rcu: PhantomData<R>,
 }
 
-impl<T, R> Drop for RcuList<T, R>
+impl<T, R, L> Drop for RcuList<T, R, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
     R: RCU,
+    L: for<'a> Lock<'a>,
 {
     fn drop(&mut self) {
         let mut tmp = self.head.load(Ordering::Relaxed);
@@ -92,12 +93,13 @@ where
     T: PartialOrd,
     R: RCU + 'a,
 {
-    pub fn new<'b>(
+    pub fn new<'b, L>(
         _guard: &'a <<R as RCU>::Handle<'b> as RcuHandle<'b>>::Guard<'b>,
-        list: &'a RcuList<T, R>,
+        list: &'a RcuList<T, R, L>,
     ) -> Self
     where
         'b: 'a,
+        L: for<'c> Lock<'c>,
     {
         let tmp = list.head.load(Ordering::Relaxed);
         Self {
@@ -125,36 +127,38 @@ where
     }
 }
 
-impl<T, R> Default for RcuList<T, R>
+impl<T, R, L> Default for RcuList<T, R, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
     R: RCU,
+    L: for<'a> Lock<'a>,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, R> RcuList<T, R>
+impl<T, R, L> RcuList<T, R, L>
 where
     RcuListElem<T>: PartialEq,
     RcuListElem<T>: PartialOrd,
     T: PartialEq,
     T: PartialOrd,
     R: RCU,
+    L: for<'a> Lock<'a>,
 {
     pub fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
-            lock: Futex::new(),
+            lock: L::new(),
             _rcu: PhantomData,
         }
     }
 
-    fn lock(&self) -> <Futex as Lock>::Guard {
+    fn lock(&self) -> <L as Lock>::Guard {
         self.lock.lock()
     }
 

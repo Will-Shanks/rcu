@@ -1,10 +1,11 @@
-use rcu::utils::{Futex, SpinLock};
+use rcu::utils::{Futex, Lock, SpinLock};
 use rcu::{cds::rculist::RcuList, cds::rculist::RcuListIterator, qsbr::Qsbr, RcuHandle, RCU};
 use std::thread;
 
-fn modify_rcu<R>(id: u64, rcu_handle: &R, list: &RcuList<u32, R>)
+fn modify_rcu<R, L>(id: u64, rcu_handle: &R, list: &RcuList<u32, R, L>)
 where
     R: RCU,
+    L: for<'a> Lock<'a>,
 {
     let mut t_handle = rcu_handle.register(id);
     t_handle.quiescent_state();
@@ -27,7 +28,7 @@ where
 #[test]
 fn single_threaded_list_futex() {
     let my_rcu = Qsbr::<Futex>::new();
-    let my_list = RcuList::<u32, Qsbr<Futex>>::new();
+    let my_list = RcuList::<u32, Qsbr<Futex>, Futex>::new();
     thread::scope(|s| {
         let handle = &my_rcu;
         thread::Builder::new()
@@ -42,7 +43,7 @@ fn single_threaded_list_futex() {
 #[test]
 fn single_threaded_list_spin() {
     let my_rcu = Qsbr::<SpinLock>::new();
-    let my_list = RcuList::<u32, Qsbr<SpinLock>>::new();
+    let my_list = RcuList::<u32, Qsbr<SpinLock>, SpinLock>::new();
     thread::scope(|s| {
         let handle = &my_rcu;
         thread::Builder::new()
@@ -57,7 +58,7 @@ fn single_threaded_list_spin() {
 #[test]
 fn multi_threaded_list_futex() {
     let my_rcu = Qsbr::<Futex>::new();
-    let my_list = RcuList::<u32, Qsbr<Futex>>::new();
+    let my_list = RcuList::<u32, Qsbr<Futex>, Futex>::new();
     thread::scope(|s| {
         for i in 0..20 {
             let handle = &my_rcu;
@@ -75,7 +76,7 @@ fn multi_threaded_list_futex() {
 #[test]
 fn multi_threaded_list_spin() {
     let my_rcu = Qsbr::<SpinLock>::new();
-    let my_list = RcuList::<u32, Qsbr<SpinLock>>::new();
+    let my_list = RcuList::<u32, Qsbr<SpinLock>, SpinLock>::new();
     thread::scope(|s| {
         for i in 0..20 {
             let handle = &my_rcu;
