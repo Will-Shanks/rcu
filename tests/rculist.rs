@@ -1,5 +1,6 @@
 use rcu::utils::{Futex, Lock, SpinLock};
 use rcu::{cds::rculist::RcuList, cds::rculist::RcuListIterator, qsbr::Qsbr};
+use rcu::{RcuHandle, RCU};
 use std::thread;
 
 fn modify_rcu<L>(id: u64, rcu_handle: &Qsbr<L>, list: &RcuList<u32, L>)
@@ -15,7 +16,7 @@ where
     assert!(elems.contains(&&id));
     // test rcu_list drop
     if id % 2 == 0 {
-        let my_elem = list.remove(&id, &t_handle);
+        let my_elem = list.remove(&id, &mut t_handle);
         assert!(my_elem == id);
     }
     drop(guard);

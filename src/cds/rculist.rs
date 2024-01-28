@@ -1,6 +1,7 @@
 use crate::qsbr::*;
 use crate::utils::Futex;
 use crate::utils::Lock;
+use crate::RcuHandle;
 use std::cmp::{PartialEq, PartialOrd};
 use std::marker::PhantomData;
 use std::{
@@ -186,9 +187,9 @@ where
         unsafe { &(*new_elem).elem }
     }
 
-    pub fn remove(&self, elem: &T, handle: &QsbrThreadHandle<L>) -> T {
+    pub fn remove(&self, elem: &T, handle: &mut QsbrThreadHandle<L>) -> T {
         let popped_elem = unsafe { self.remove_unsynced(elem) };
-        handle.sync();
+        handle.quiescent_sync();
 
         unsafe { Box::from_raw(popped_elem) }.elem
     }

@@ -1,5 +1,7 @@
 use crate::cds::rculist::*;
 use crate::utils::Lock;
+use crate::{RcuGuard, RcuHandle, RCU};
+use std::marker::PhantomData;
 use std::sync::atomic::{self, AtomicU32, Ordering};
 
 /// QSBR quiescent state based reclamation
@@ -31,23 +33,6 @@ where
     fn lock(&self) -> <L as Lock<'_>>::Guard {
         self.lock.lock()
     }
-    /// create a new Qsbr
-    pub fn new() -> Self {
-        Self {
-            threads: RcuList::new(),
-            lock: L::new(),
-        }
-    }
-    /// register a new thread with Qsbr
-    /// takes an unique id for this handle
-    /// thread::current().id().as_u64().get() could be a good choice if std is available
-    pub fn register(&self, id: u64) -> QsbrThreadHandle<L> {
-        let elem: &Tentry = self.threads.insert(Tentry::new(id));
-        QsbrThreadHandle {
-            info: elem,
-            qsbr: self,
-        }
-    }
 
     /// Saftey: Need to ensure no other threads are referencing the given Tentry before it is
     /// dropped, this can be done by syncing, plus waiting for all other threads already syncing
@@ -57,33 +42,61 @@ where
     }
 }
 
+impl<L> RCU for Qsbr<L>
+where
+    L: for<'a> Lock<'a>,
+{
+    type Handle<'a> = QsbrThreadHandle<'a, L> where L: 'a;
+    /// create a new Qsbr
+    fn new() -> Self {
+        Self {
+            threads: RcuList::new(),
+            lock: L::new(),
+        }
+    }
+    /// register a new thread with Qsbr
+    /// takes an unique id for this handle
+    /// thread::current().id().as_u64().get() could be a good choice if std is available
+    fn register(&self, id: u64) -> Self::Handle<'_> {
+        let elem: &Tentry = self.threads.insert(Tentry::new(id));
+        QsbrThreadHandle {
+            info: elem,
+            qsbr: self,
+        }
+    }
+}
+
 ///created via Qsbr::register(), used to register a thread with the Qsbr,
 pub struct QsbrThreadHandle<'a, L>
 where
     L: for<'b> Lock<'b>,
+    Self: 'a,
 {
     qsbr: &'a Qsbr<L>,
     //needs to be an option so can set to None as part of Self::Drop
     info: &'a Tentry,
 }
 
-impl<L> QsbrThreadHandle<'_, L>
+impl<L> RcuGuard<'_> for QsbrGuard<'_, L> where L: for<'lock> Lock<'lock> {}
+
+impl<'a, L> RcuHandle<'a> for QsbrThreadHandle<'a, L>
 where
-    L: for<'a> Lock<'a>,
+    L: for<'lock> Lock<'lock>,
 {
+    type Guard<'b> = QsbrGuard<'b, L> where 'a: 'b;
     /// read starts an rcu critical section, which lasts until the returned
     /// QsbrGuard is dropped, is a no op, but used to ensure liveness of references
     /// by stop quescent_state from being called
-    pub fn read(&self) -> QsbrGuard<L> {
+    fn read(&self) -> Self::Guard<'a> {
         QsbrGuard {
-            thread_handle: self,
+            _thread_handle: &PhantomData,
         }
     }
     /// quiescent_state is use to signal to the Qsbr that this thread has passed
     /// through a quiescent state. If this method is not called frequent enough
     /// other QsbrThreadHandle calling sync will block, reducing performance and
     /// in pathilogical cases, causing the program to crash due to OOMing
-    pub fn quiescent_state(&mut self) {
+    fn quiescent_state(&mut self) {
         //Ordering: no other thread should be updating qstate, so relaxed is safe
         //make sure we don't accidentally wrap
         if self.info.qstate.fetch_add(1, Ordering::Release) > u32::MAX / 2 {
@@ -93,19 +106,21 @@ where
         atomic_wait::wake_all(&self.info.qstate);
     }
 
-    fn get_state(&self) -> Vec<(u64, u32)> {
-        let guard = self.read();
-        let state_copy: Vec<(u64, u32)> = RcuListIterator::new(&guard, &self.qsbr.threads)
-            .map(|e: &Tentry| (e.id, e.qstate.load(Ordering::Relaxed)))
-            .collect();
-        // make sure state_copy "happened before" fn return
-        atomic::fence(Ordering::Acquire);
-        state_copy
+    fn quiescent_sync(&mut self) {
+        let qstate = self.info.qstate.swap(1, Ordering::Release);
+        self.sync();
+        if qstate > u32::MAX / 2 {
+            //Ordering: needs to happen before the sync that sees it
+            self.info.qstate.store(10, Ordering::Release);
+        } else {
+            self.info.qstate.store(qstate + 1, Ordering::Release);
+        }
+        atomic_wait::wake_all(&self.info.qstate);
     }
 
     /// Used to synchronize all QsbrThreadHandles, blocks until all handles have
     /// called quiescent_state, signalling that a grace period has passed
-    pub fn sync(&self) {
+    fn sync(&self) {
         //TODO
         // split code into 3 parts:
         // 1: create `local_copy` - a list of all Tentrys and their status
@@ -119,7 +134,7 @@ where
         // dropping a Tentry
 
         // Ordering: set long term quescent state
-        let prev_state = self.info.qstate.swap(1, Ordering::Release);
+        //let prev_state = self.info.qstate.swap(1, Ordering::Release);
 
         let local_copy = self.get_state();
 
@@ -160,13 +175,29 @@ where
         atomic::fence(Ordering::Acquire);
 
         //Ordering: passed through a quescent state while syncing
-        if prev_state > u32::MAX / 2 {
-            self.info.qstate.store(10, Ordering::Release);
-        } else {
-            self.info.qstate.store(prev_state + 1, Ordering::Release);
-        }
+        //if prev_state > u32::MAX / 2 {
+        //    self.info.qstate.store(10, Ordering::Release);
+        //} else {
+        //    self.info.qstate.store(prev_state + 1, Ordering::Release);
+        //}
         atomic_wait::wake_all(&self.info.qstate);
     }
+}
+
+impl<L> QsbrThreadHandle<'_, L>
+where
+    L: for<'lock> Lock<'lock>,
+{
+    fn get_state(&self) -> Vec<(u64, u32)> {
+        let guard = self.read();
+        let state_copy: Vec<(u64, u32)> = RcuListIterator::new(&guard, &self.qsbr.threads)
+            .map(|e: &Tentry| (e.id, e.qstate.load(Ordering::Relaxed)))
+            .collect();
+        // make sure state_copy "happened before" fn return
+        atomic::fence(Ordering::Acquire);
+        state_copy
+    }
+
     // basically the same as regular sync, EXCEPT syncing doesn't count as a quescent state
     // this is needed for dropping a thread handle, since they are used to get thread states when
     // syncing on going syncs need to complete first
@@ -265,8 +296,8 @@ pub struct QsbrGuard<'a, L>
 where
     L: for<'lock> Lock<'lock>,
 {
-    #[allow(dead_code)]
-    thread_handle: &'a QsbrThreadHandle<'a, L>,
+    _thread_handle: &'a PhantomData<L>,
+    //thread_handle: &'a QsbrThreadHandle<'a, L>,
 }
 
 // end the rcu critical section

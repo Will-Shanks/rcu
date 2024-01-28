@@ -1,5 +1,6 @@
 use rcu::qsbr::Qsbr;
 use rcu::utils::{Futex, Lock, SpinLock};
+use rcu::RCU;
 use std::thread;
 
 fn register_worker<L>(id: u64, rcu_handle: &Qsbr<L>)
