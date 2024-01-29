@@ -16,10 +16,20 @@ pub trait RcuHandle<'a> {
     where
         Self: 'a,
         'a: 'g;
+    type Sleeper<'s>: SleepingRcu<'s>
+    where
+        Self: 'a,
+        'a: 's;
     fn read(&self) -> Self::Guard<'a>;
     fn quiescent_state(&mut self);
+    fn sleep(self) -> Self::Sleeper<'a>;
     fn sync(&self);
     fn quiescent_sync(&mut self);
 }
 
 pub trait RcuGuard<'a> {}
+
+pub trait SleepingRcu<'a> {
+    type Handle: RcuHandle<'a>;
+    fn wake(self) -> Self::Handle;
+}

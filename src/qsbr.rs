@@ -1,6 +1,6 @@
 use crate::cds::rculist::*;
 use crate::utils::Lock;
-use crate::{RcuGuard, RcuHandle, RCU};
+use crate::{RcuGuard, RcuHandle, SleepingRcu, RCU};
 use std::marker::PhantomData;
 use std::sync::atomic::{self, AtomicU32, Ordering};
 
@@ -39,6 +39,25 @@ where
     /// to finish
     unsafe fn remove(&self, elem: &Tentry) -> *mut RcuListElem<Tentry> {
         unsafe { self.threads.remove_unsynced(elem) }
+    }
+}
+
+pub struct QsbrSleeper<'a, L>
+where
+    L: for<'l> Lock<'l>,
+{
+    handle: QsbrThreadHandle<'a, L>,
+}
+
+impl<'a, L> SleepingRcu<'a> for QsbrSleeper<'a, L>
+where
+    L: for<'l> Lock<'l>,
+{
+    type Handle = QsbrThreadHandle<'a, L>;
+    fn wake(self) -> Self::Handle {
+        self.handle.info.qstate.store(10, Ordering::Release);
+        atomic_wait::wake_all(&self.handle.info.qstate);
+        self.handle
     }
 }
 
@@ -84,6 +103,11 @@ where
     L: for<'lock> Lock<'lock>,
 {
     type Guard<'b> = QsbrGuard<'b, L> where Self: 'a, 'a: 'b;
+    type Sleeper<'b> = QsbrSleeper<'b, L> where Self: 'a, 'a: 'b;
+    fn sleep(self) -> Self::Sleeper<'a> {
+        self.info.qstate.store(2, Ordering::Release);
+        Self::Sleeper { handle: self }
+    }
     /// read starts an rcu critical section, which lasts until the returned
     /// QsbrGuard is dropped, is a no op, but used to ensure liveness of references
     /// by stop quescent_state from being called
@@ -328,8 +352,8 @@ struct Tentry {
     /// incremented everytime this thread calls quiescent_state()
     /// starts at 10
     ///  0 means thread is in a quiescent_state, useful for removing
-    ///  1 means doing a sync which is a quescent_state, but means ThreadHandles shouldn't be
-    ///    dropped from the qsbr
+    ///  1 means doing a drop_sync, but means ThreadHandles shouldn't be
+    ///    dropped from the qsbr, but is otherwise a quescent_state
     ///  2 long quescent_state, safe to sync and crucially drop_sync as well
     ///
     /// Tentrys, or for signalling extended quiescent states
