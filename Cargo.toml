@@ -1,6 +1,6 @@
 [workspace]
 
-members = [
+members = [ "liburcu-sys",
     "rcu"
     ]
 
